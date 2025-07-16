@@ -9,7 +9,7 @@ ruamel.yaml
 img2dataset
 click
 torch==2.7.0
-torchvision=0.22.0
+torchvision==0.22.0
 xformers
 tensorboard
 lightning[pytorch-extra]
