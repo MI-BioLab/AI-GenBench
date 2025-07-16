@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from functools import lru_cache
 import json
+import os
 from pathlib import Path
 from typing import Iterable, List, Optional
 import warnings
@@ -26,6 +27,8 @@ class RaiseDatasetManager(RealImagesBuilder):
         self.root_path = Path(root_path)
         self.convert_to_jpeg = convert_to_jpeg
         self.tmp_cache_dir = Path(tmp_cache_dir) if tmp_cache_dir is not None else None
+        if not self.root_path.exists():
+            raise FileNotFoundError(f"Root path does not exist: {self.root_path}")
 
     def get_prefix(self) -> str:
         return "RAISE"
