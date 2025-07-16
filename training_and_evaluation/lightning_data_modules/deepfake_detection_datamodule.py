@@ -365,6 +365,9 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
         real_indices = [i for i, gen in enumerate(generator_labels) if gen == ""]
         fake_indices = [i for i, gen in enumerate(generator_labels) if gen != ""]
 
+        selected_real_images: List[int] = []
+        selected_fake_images: List[int] = []
+
         # Balance images (stratified)
         if n_real > n_fake:
             n_to_select = n_fake
@@ -382,6 +385,9 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
                 stratify=[generator_labels[i] for i in fake_indices],
                 random_state=self.data_management_seed + 1,
             )
+        else:
+            selected_real_images = real_indices
+            selected_fake_images = fake_indices
 
         subset_indices = selected_real_images + selected_fake_images
         validation_dataset = validation_dataset.select(subset_indices)
@@ -495,6 +501,9 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
         real_indices = [i for i, gen in enumerate(generator_labels) if gen == ""]
         fake_indices = [i for i, gen in enumerate(generator_labels) if gen != ""]
 
+        selected_real_images: List[int] = []
+        selected_fake_images: List[int] = []
+
         # Balance images (stratified)
         if n_real > n_fake:
             n_to_select = n_fake
@@ -512,6 +521,9 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
                 stratify=[generator_labels[i] for i in fake_indices],
                 random_state=self.data_management_seed + 1,
             )
+        else:
+            selected_real_images = real_indices
+            selected_fake_images = fake_indices
 
         subset_indices = selected_real_images + selected_fake_images
         test_dataset = test_dataset.select(subset_indices)
