@@ -133,9 +133,3 @@ The main things you may want to change are:
 - `make_eval_crops()`: this method is used to create the crops (for evaluation only). The default implementation already takes care of resizeing or cropping or multi-cropping the image based on the `evaluation_cropping_strategy` configuration value. You can override it if you want to change the cropping strategy.
 
 That's it! Just remember that, in [ai_genbench_pipeline.py](lightning_data_modules/ai_genbench_pipeline.py), **a part of the evaluation augmentations are mandatory (only if you want to follow the benchmark protocol, of course)**. The **mandatory augmentations** are designed to create images that **could be realistically considered as "real"** and thus used on social media posts/newspapers/..., while still adding distorsion, compressions, etcetera. You can find the mandatory augmentations in the `mandatory_val_preprocessing()` method of the `AIGenBenchPipeline` class. You can still add your own augmentations in the model's `val/test/predict_augmentation()` methods, that will be executed *after* the mandatory ones (mandatory ones are used to mimic a situation in which the detection system receives images as they were already distorted using that pipeline).
-
-## Leaderboard and paper
-- Our paper, **AI-GenBench: A New Ongoing Benchmark for AI-Generated Image Detection**, is available on:
-    - IJCNN 2025 proceedings (Verimedia workshop) (to be published)
-    - [arXiv](https://arxiv.org/abs/2504.20865)
-- For an up-to-date leaderboard of the benchmark, please refer to the [README in the root of the repository](../README.md)

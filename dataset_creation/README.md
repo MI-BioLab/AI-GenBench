@@ -102,9 +102,3 @@ IMPORTANT: if you find issues downloading those datasets, please open an issue o
 - [ImageNet (ILSVRC 2012)](https://www.image-net.org/index.php): manual download. Unpack it in your preferred folder and set the path as the `imagenet` key in `local_simple.cfg`.
 - [RAISE (all)](http://loki.disi.unitn.it/RAISE/index.php)
   - Download the filelist, and then check [`dataset_download_scripts/raise_all_download.py`](dataset_download_scripts/raise_all_download.py) to download images. Also, set the path as the `raise` key in `local_simple.cfg`.
-
-## Leaderboard and paper
-- Our paper, **AI-GenBench: A New Ongoing Benchmark for AI-Generated Image Detection**, is available on:
-    - IJCNN 2025 proceedings (Verimedia workshop) (to be published)
-    - [arXiv](https://arxiv.org/abs/2504.20865)
-- For an up-to-date leaderboard of the benchmark, please refer to the [README in the root of the repository](../README.md)
