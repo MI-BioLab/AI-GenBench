@@ -42,7 +42,9 @@ def make_soft_train_aug(
             transforms.RandomApply(
                 [
                     transforms.Lambda(
-                        lambda img: data_augment_cmp(img, ["cv2", "pil"], [50, 101])
+                        lambda img: data_augment_cmp(
+                            img, ["cv2", "pil"], list(range(50, 101))
+                        )
                     )
                 ],
                 p=0.50,
@@ -51,7 +53,9 @@ def make_soft_train_aug(
             transforms.RandomApply(
                 [
                     transforms.Lambda(
-                        lambda img: data_augment_cmp(img, ["cv2", "pil"], [50, 101])
+                        lambda img: data_augment_cmp(
+                            img, ["cv2", "pil"], list(range(50, 101))
+                        )
                     )
                 ],
                 p=0.20,
@@ -75,7 +79,9 @@ def make_soft_train_aug(
             transforms.RandomApply(
                 [
                     transforms.Lambda(
-                        lambda img: data_augment_cmp(img, ["cv2", "pil"], [50, 101])
+                        lambda img: data_augment_cmp(
+                            img, ["cv2", "pil"], list(range(50, 101))
+                        )
                     )
                 ],
                 p=0.10,

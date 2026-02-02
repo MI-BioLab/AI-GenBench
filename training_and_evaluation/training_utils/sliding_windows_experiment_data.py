@@ -19,6 +19,7 @@ class SlidingWindowsExperimentInfo:
             benchmark_type="none",
         )
     )
+    load_weights_from_previous_window: bool = True
     experiment_id: Optional[Union[int, str]] = None
     experiment_name_prefix: str = "experiment_"
     window_name_prefix: str = "window_"

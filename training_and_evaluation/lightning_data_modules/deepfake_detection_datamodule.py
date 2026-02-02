@@ -1,8 +1,5 @@
 from abc import ABC
-from pathlib import Path
 import random
-import subprocess
-import time
 from typing import (
     Any,
     Callable,
@@ -14,16 +11,17 @@ from typing import (
     Tuple,
     Union,
     Protocol,
+    TYPE_CHECKING,
 )
 import warnings
 
-from algorithms.abstract_model import AbstractBaseDeepfakeDetectionModel
 from lightning_data_modules.augmentation_utils.image_augmenters import (
     TrainImageAugmenter,
 )
 from lightning_data_modules.augmentation_utils.image_augmenters import (
     EvaluationImageAugmenter,
 )
+from lightning_data_modules.replay_strategies.replay_strategy import ReplayStrategy
 from training_utils.sliding_windows_experiment_data import SlidingWindowsDefinition
 from training_utils.train_data_utils import (
     DatasetWithGeneratorID,
@@ -37,13 +35,21 @@ import lightning as L
 from datasets import DatasetDict, Dataset
 from torch.utils.data import DataLoader
 
-import traceback
 
 from sklearn.model_selection import train_test_split
 
 from dataset_loading.pytorch_dataset import PyTorchDataset
 
 import copy
+
+if TYPE_CHECKING:
+    from algorithms.abstract_model import AbstractBaseDeepfakeDetectionModel
+
+
+from large_image import LargeImage
+import datasets
+
+datasets.features.features.register_feature(LargeImage, "LargeImage")
 
 
 REAL_IMAGES_LABEL = 0
@@ -71,6 +77,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
         deterministic_augmentations: bool = True,
         augmentation_factor: int = 1,
         augmentations_base_seed: int = 4321,
+        replay_strategy: Optional[ReplayStrategy] = None,
     ):
         super().__init__()
 
@@ -123,9 +130,16 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
                 or sliding_windows_definition.current_window >= 0
             )
 
+        has_replay = replay_strategy is not None
+        is_cl = sliding_windows_definition.benchmark_type == "continual_learning"
+        assert (
+            has_replay == is_cl
+        ), "Replay strategy must be provided if and only if the benchmark type is 'continual_learning'."
+
         self.sliding_windows_definition: SlidingWindowsDefinition = (
             sliding_windows_definition
         )
+        self.replay_strategy = replay_strategy
 
         self.train_dataset: Optional[PyTorchDataset] = None
         self.valid_dataset: Optional[PyTorchDataset] = None
@@ -168,13 +182,20 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
             self._generator_id_to_name = self._make_generator_id_to_name()
         return self._generator_id_to_name
 
+    @property
+    def generator_name_to_id(self) -> Dict[str, int]:
+        """
+        Returns a dictionary mapping generator names to their corresponding IDs.
+        """
+        return {name: i for i, name in enumerate(self.generator_id_to_name)}
+
     def _make_generator_id_to_name(
         self, dataset: Optional[Dataset] = None
     ) -> List[str]:
         if dataset is None:
             dataset = self.dataset["train"]
 
-        generators: List[str] = sorted(set(dataset["generator"]))
+        generators: List[str] = sorted(set(dataset["generator"][:]))
         return generators
 
     @property
@@ -186,6 +207,11 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
 
     @property
     def validation_dataset_splitting(self) -> Dict[int, int]:
+        """
+        Returns a dictionary mapping real image IDs to the corresponding fake generator ID.
+
+        This is the static "pairing" used to compute the validation metrics.
+        """
         if self._validation_dataset_splitting is None:
             self.setup_val()
 
@@ -194,6 +220,11 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
 
     @property
     def test_dataset_splitting(self) -> Dict[int, int]:
+        """
+        Returns a dictionary mapping real image IDs to the corresponding fake generator ID.
+
+        This is the static "pairing" used to compute the test metrics.
+        """
         if self._test_dataset_splitting is None:
             self.setup_test()
 
@@ -263,7 +294,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
         self.train_loader_parameters["batch_size"] = self.per_device_train_batch_size
         self.eval_loader_parameters["batch_size"] = self.per_device_eval_batch_size
 
-        if self.trainer.is_global_zero:
+        if self.is_global_zero:
             # Print batch size information
             accumulate_grad_batches = self.trainer.accumulate_grad_batches
             overall_batch_size = (
@@ -300,11 +331,11 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
             else:
                 n_elements_to_keep = int(self.train_subset_size)
 
-            if self.trainer.is_global_zero:
+            if self.is_global_zero:
                 print("Will use a train subset of size", n_elements_to_keep)
 
             # Select stratified subset
-            generator_labels = train_dataset["generator"]
+            generator_labels = train_dataset["generator"][:]
             subset_indices, _ = train_test_split(
                 list(range(len(train_dataset))),
                 train_size=n_elements_to_keep,
@@ -316,7 +347,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
         deterministic_augmentation, non_deterministic_augmentation = self.train_aug()
 
         self.train_dataset = PyTorchDataset(
-            dataset=self.dataset_generator_name_to_id(train_dataset),
+            dataset=self._make_dataset(train_dataset),
             augmentation=deterministic_augmentation,
             augmentation_factor=self.augmentation_factor,
             non_deterministic_post_process=non_deterministic_augmentation,
@@ -324,10 +355,11 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
             enable_deterministic_augmentations=self.deterministic_augmentations,
         )
 
-        n_real = sum(1 for label in train_dataset["label"] if label == 0)
-        n_fake = sum(1 for label in train_dataset["label"] if label == 1)
+        train_dataset_labels = train_dataset["label"][:]
+        n_real = sum(1 for label in train_dataset_labels if label == 0)
+        n_fake = sum(1 for label in train_dataset_labels if label == 1)
 
-        if self.trainer.is_global_zero:
+        if self.is_global_zero:
             print(
                 "Training dataset contains",
                 len(self.train_dataset),
@@ -340,7 +372,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
 
     def setup_val(self):
         validation_dataset = self.dataset["validation"]
-        generator_labels = validation_dataset["generator"]
+        generator_labels = validation_dataset["generator"][:]
 
         validation_generators: List[str] = sorted(set(generator_labels))
 
@@ -353,7 +385,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
         n_real = sum([1 for gen in generator_labels if gen == ""])
         n_fake = len(generator_labels) - n_real
 
-        if self.trainer.is_global_zero:
+        if self.is_global_zero:
             print(
                 "Original validation dataset contains",
                 n_real,
@@ -385,11 +417,11 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
 
         subset_indices = selected_real_images + selected_fake_images
         validation_dataset = validation_dataset.select(subset_indices)
-        generator_labels = validation_dataset["generator"]
+        generator_labels = validation_dataset["generator"][:]
         n_real = sum([1 for gen in generator_labels if gen == ""])
         n_fake = len(generator_labels) - n_real
 
-        if self.trainer.is_global_zero:
+        if self.is_global_zero:
             print(
                 "Balanced validation dataset contains",
                 n_real,
@@ -410,7 +442,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
             else:
                 n_elements_to_keep = int(self.validation_subset_size)
 
-            if self.trainer.is_global_zero:
+            if self.is_global_zero:
                 print("Will use a validation subset of size", n_elements_to_keep)
 
             subset_indices, _ = train_test_split(
@@ -420,7 +452,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
                 random_state=self.data_management_seed + 2,
             )
             validation_dataset = validation_dataset.select(subset_indices)
-            generator_labels = validation_dataset["generator"]
+            generator_labels = validation_dataset["generator"][:]
 
         # Pre-shuffle the dataset to prevent eval-time performance issues
         validation_dataset = validation_dataset.shuffle(
@@ -428,7 +460,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
             keep_in_memory=True,
         )
 
-        generator_labels = validation_dataset["generator"]
+        generator_labels = validation_dataset["generator"][:]
 
         # Pair each fake image with a real image
         real_indices = [i for i, gen in enumerate(generator_labels) if gen == ""]
@@ -442,26 +474,24 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
 
         validation_dataset_splitting = dict()
         image_identifiers = validation_dataset["ID"]
-        generator_name_to_id_dict = {
-            name: i for i, name in enumerate(self.generator_id_to_name)
-        }
+
         for fake_idx, real_idx in zip(fake_indices, real_indices):
             generator_name = generator_labels[fake_idx]
             validation_dataset_splitting[image_identifiers[real_idx]] = (
-                generator_name_to_id_dict[generator_name]
+                self.generator_name_to_id[generator_name]
             )
 
         self._validation_dataset_splitting = validation_dataset_splitting
 
         self.valid_dataset = PyTorchDataset(
-            dataset=self.dataset_generator_name_to_id(validation_dataset),
+            dataset=self._make_dataset(validation_dataset),
             augmentation=self.val_aug(),
             augmentation_factor=1,
             base_seed=self.augmentations_base_seed,
             enable_deterministic_augmentations=self.deterministic_augmentations,
         )
 
-        if self.trainer.is_global_zero:
+        if self.is_global_zero:
             print(
                 "Validation dataset contains",
                 len(validation_dataset),
@@ -470,7 +500,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
 
     def setup_test(self):
         test_dataset = self.dataset["validation"]
-        generator_labels = test_dataset["generator"]
+        generator_labels = test_dataset["generator"][:]
 
         test_generators: List[str] = sorted(set(generator_labels))
 
@@ -483,7 +513,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
         n_real = sum([1 for gen in generator_labels if gen == ""])
         n_fake = len(generator_labels) - n_real
 
-        if self.trainer.is_global_zero:
+        if self.is_global_zero:
             print(
                 "Original test dataset contains",
                 n_real,
@@ -515,11 +545,11 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
 
         subset_indices = selected_real_images + selected_fake_images
         test_dataset = test_dataset.select(subset_indices)
-        generator_labels = test_dataset["generator"]
+        generator_labels = test_dataset["generator"][:]
         n_real = sum([1 for gen in generator_labels if gen == ""])
         n_fake = len(generator_labels) - n_real
 
-        if self.trainer.is_global_zero:
+        if self.is_global_zero:
             print(
                 "Balanced test dataset contains",
                 n_real,
@@ -537,7 +567,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
                 random_state=self.data_management_seed + 2,
             )
             test_dataset = test_dataset.select(subset_indices)
-            generator_labels = test_dataset["generator"]
+            generator_labels = test_dataset["generator"][:]
 
         # Pre-shuffle the dataset to prevent eval-time performance issues
         test_dataset = test_dataset.shuffle(
@@ -545,7 +575,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
             keep_in_memory=True,
         )
 
-        generator_labels = test_dataset["generator"]
+        generator_labels = test_dataset["generator"][:]
 
         # Pair each fake image with a real image
         real_indices = [i for i, gen in enumerate(generator_labels) if gen == ""]
@@ -556,27 +586,24 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
         random.shuffle(real_indices)
 
         test_dataset_splitting = dict()
-        image_identifiers = test_dataset["ID"]
-        generator_name_to_id_dict = {
-            name: i for i, name in enumerate(self.generator_id_to_name)
-        }
+        image_identifiers = test_dataset["ID"][:]
         for fake_idx, real_idx in zip(fake_indices, real_indices):
             generator_name = generator_labels[fake_idx]
             test_dataset_splitting[image_identifiers[real_idx]] = (
-                generator_name_to_id_dict[generator_name]
+                self.generator_name_to_id[generator_name]
             )
 
         self._test_dataset_splitting = test_dataset_splitting
 
         self.test_dataset = PyTorchDataset(
-            dataset=self.dataset_generator_name_to_id(test_dataset),
+            dataset=self._make_dataset(test_dataset),
             augmentation=self.test_aug(),
             augmentation_factor=1,
             base_seed=self.augmentations_base_seed,
             enable_deterministic_augmentations=self.deterministic_augmentations,
         )
 
-        if self.trainer.is_global_zero:
+        if self.is_global_zero:
             print(
                 "Test dataset contains",
                 len(self.test_dataset),
@@ -588,7 +615,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
 
         # For debugging purposes
         if False:
-            generator_labels = predict_dataset["generator"]
+            generator_labels = predict_dataset["generator"][:]
             subset_indices, _ = train_test_split(
                 list(range(len(predict_dataset))),
                 train_size=1000,
@@ -597,14 +624,14 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
             predict_dataset = predict_dataset.select(subset_indices)
 
         self.prediction_dataset = PyTorchDataset(
-            dataset=self.dataset_generator_name_to_id(predict_dataset),
+            dataset=self._make_dataset(predict_dataset),
             augmentation=self.predict_aug(),
             augmentation_factor=1,
             base_seed=self.augmentations_base_seed,
             enable_deterministic_augmentations=self.deterministic_augmentations,
         )
 
-        if self.trainer.is_global_zero:
+        if self.is_global_zero:
             print(
                 "Prediction (validation) dataset contains",
                 len(self.prediction_dataset),
@@ -783,15 +810,15 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
     def mandatory_predict_preprocessing(self) -> Optional[Callable]:
         return None
 
-    def dataset_generator_name_to_id(self, dataset: Dataset) -> DatasetWithGeneratorID:
-        return DatasetWithGeneratorID(dataset, self.generator_id_to_name)
+    def _make_dataset(self, dataset: Dataset) -> DatasetWithGeneratorID:
+        return DatasetWithGeneratorID(dataset, self.generator_name_to_id)
 
     @property
     def available_generators(self) -> Set[str]:
         """
         A list of available synthetic images generators (excluding "real").
         """
-        generators = set(self.dataset["train"]["generator"])
+        generators = set(self.dataset["train"]["generator"][:])
         generators.remove("")
         return generators
 
@@ -819,7 +846,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
         Returns a list of sliding windows, each window being a list of indices of elements
         in the training dataset.
 
-        The elements included in each windows are:
+        The elements included in each window are:
         - for fake images, the ones defined in self.windows_timeline
         - randomly selected real images from the training dataset.
         The number of real images is equal to the number of fake images in the same window.
@@ -833,7 +860,7 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
 
         indices_timeline: List[List[int]] = []
 
-        generator_labels = reference_dataset["generator"]
+        generator_labels = reference_dataset["generator"][:]
         available_real_images = set(
             [i for i, gen in enumerate(generator_labels) if gen == ""]
         )
@@ -855,7 +882,42 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
             for i in range(1, len(indices_timeline)):
                 indices_timeline[i] += indices_timeline[i - 1]
 
-        return indices_timeline
+        if self.replay_strategy is None:
+            return indices_timeline
+
+        # Include replay samples
+        if self.is_global_zero:
+            print("Using replay strategy:", self.replay_strategy.__class__.__name__)
+        replay_timeline: List[List[int]] = []
+
+        for window_idx in range(len(indices_timeline)):
+            if window_idx == 0:
+                replay_timeline.append([])
+            else:
+                # Select the IDs of the replay samples
+                current_buffer_ids = self.replay_strategy.make_current_buffer(
+                    full_training_dataset=reference_dataset,
+                    past_dataset=reference_dataset.select(
+                        sum(indices_timeline[:window_idx], [])
+                    ),
+                    sliding_windows_timeline=self.windows_timeline,
+                    n_th_window=window_idx,
+                    generator_name_to_id=self.generator_name_to_id,
+                )
+
+                # Convert IDs to indices
+                current_buffer_indices = dataset_ids_to_indices(
+                    reference_dataset, current_buffer_ids
+                )
+                replay_timeline.append(current_buffer_indices)
+
+        timeline_with_replay = []
+        for window_idx in range(len(indices_timeline)):
+            timeline_with_replay.append(
+                indices_timeline[window_idx] + replay_timeline[window_idx]
+            )
+
+        return timeline_with_replay
 
     def _make_sliding_windows_generators_order(self) -> List[List[str]]:
         """
@@ -922,12 +984,17 @@ class DeepfakeDetectionDatamodule(L.LightningDataModule, ABC):
         assert isinstance(model_train_aug[0], Callable)
         assert isinstance(model_train_aug[1], Callable)
 
+        # Integrates the cropping strategy defined in methods like make_val_crops, make_test_crops, etc.
         return EvaluationImageAugmenter(
             mandatory_preprocessing=manadatory_preprocessing,
             pre_crop_augmentation=model_train_aug[0],
             post_crop_augmentation=model_train_aug[1],
             cropping_strategy=getattr(self, f"make_{stage}_crops"),
         )
+
+    @property
+    def is_global_zero(self) -> bool:
+        return self.trainer.is_global_zero if self.trainer is not None else True
 
 
 def multicrop_collate(batch: List[Sequence[Any]]):
@@ -986,6 +1053,35 @@ def multicrop_collate(batch: List[Sequence[Any]]):
     collated_result = default_collate(data_to_collate)
 
     return collated_result
+
+
+def dataset_ids_to_indices(dataset: Dataset, ids: List[int]) -> List[int]:
+    """
+    Converts a list of dataset IDs to their corresponding indices in the dataset.
+
+    Args:
+        dataset (Dataset): The dataset containing the data.
+        ids (List[int]): A list of dataset IDs to be converted.
+
+    Returns:
+        List[int]: A list of indices corresponding to the provided dataset IDs.
+    """
+    id_to_index = {id_: idx for idx, id_ in enumerate(dataset["ID"][:])}
+    return [id_to_index[id_] for id_ in ids]
+
+
+def dataset_indices_to_ids(dataset: Dataset, indices: List[int]) -> List[int]:
+    """
+    Converts a list of dataset indices to their corresponding dataset IDs.
+
+    Args:
+        dataset (Dataset): The dataset containing the data.
+        indices (List[int]): A list of dataset indices to be converted.
+
+    Returns:
+        List[int]: A list of dataset IDs corresponding to the provided indices.
+    """
+    return [dataset["ID"][idx] for idx in indices]
 
 
 __all__ = ["REAL_IMAGES_LABEL", "FAKE_IMAGES_LABEL", "DeepfakeDetectionDatamodule"]

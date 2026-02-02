@@ -142,6 +142,26 @@ class DeepFakePredictionsDump(MultiStageBasePredictionWriter):
                 else:
                     to_save[f"data_pred_{i}"] = data_pred
 
+        additional_elements = None
+        if hasattr(pl_module, "elements_to_dump"):
+            # If the model has a method to dump additional elements, use it
+            additional_elements = pl_module.elements_to_dump
+
+        assert additional_elements is None or isinstance(
+            additional_elements, dict
+        ), "Module's elements_to_dump field should be a dictionary of additional elements to save."
+
+        if additional_elements is not None and trainer.global_rank == 0:
+            # Merge additional elements into the to_save dictionary
+            for key, value in additional_elements.items():
+                assert key not in to_save, (
+                    f"Key '{key}' from elements_to_dump already exists in to_save. "
+                    "Please ensure unique keys."
+                )
+                if isinstance(value, Tensor):
+                    value = DeepFakePredictionsDump.to_numpy(value)
+                to_save[key] = value
+
         # Save predictions
         rank = trainer.global_rank
         path = save_dir / f"predictions_{stage}_{rank}.npz"
@@ -171,7 +191,7 @@ class DeepFakePredictionsDump(MultiStageBasePredictionWriter):
 
         if trainer.global_rank == 0:
             # Wait for all prediction files to be available
-            # (Alas, barrier may have some issues in some systems here...)
+            # (Alas, torch dist barrier may have some issues in some systems here...)
             max_wait_time = 60  # 1 minute timeout
             wait_interval = 1  # Check every 1 second
             waited_time = 0
@@ -229,11 +249,18 @@ class DeepFakePredictionsDump(MultiStageBasePredictionWriter):
 
             # Concatenate each element
             keys = list(elements[0].keys())
+            other_keys = list(elements[1 if trainer.world_size > 1 else 0].keys())
+            additional_keys = set(keys) - set(other_keys)
+            common_keys = set(keys) & set(other_keys)
 
-            for key in keys:
+            for key in common_keys:
                 concat_elements[key] = np.concatenate(
                     [data[key] for data in elements], axis=0
                 )
+
+            # Add the additional keys from the first element (rank 0)
+            for key in additional_keys:
+                concat_elements[key] = elements[0][key]
 
             datamodule: "DeepfakeDetectionDatamodule" = trainer.datamodule
             concat_elements["generator_id_to_name"] = np.array(

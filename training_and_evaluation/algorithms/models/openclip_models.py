@@ -104,8 +104,11 @@ class OpenClipLinear(nn.Module):
     def forward_head(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc(x)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_head(self.forward_features(x))
+    def forward(self, x: torch.Tensor, return_feature=False) -> torch.Tensor:
+        features = self.forward_features(x)
+        if return_feature:
+            return features
+        return self.forward_head(features)
 
     @property
     def backbone(self) -> "CLIP":
@@ -166,8 +169,11 @@ class OpenClipTune(nn.Module):
     def forward_head(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc(x)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_head(self.forward_features(x))
+    def forward(self, x: torch.Tensor, return_feature=False) -> torch.Tensor:
+        features = self.forward_features(x)
+        if return_feature:
+            return features
+        return self.forward_head(features)
 
 
 class ChannelLinear(nn.Linear):

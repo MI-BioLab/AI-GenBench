@@ -3,6 +3,8 @@ from lightning import LightningDataModule, LightningModule, Trainer
 from torch import Tensor
 import torch
 
+from training_metrics.metrics_manager import remap_labels_and_preds
+
 from .metrics_manager import GroupT, GeneratorKey, MetricsManager, StageT
 
 if TYPE_CHECKING:
@@ -111,11 +113,17 @@ class MetricsManagerSlidingWindow(MetricsManager):
         assert datamodule.sliding_windows_definition is not None
         assert datamodule.sliding_windows_definition.current_window is not None
 
-        current_window: int = datamodule.sliding_windows_definition.current_window
+        current_window: int = (
+            0
+            if datamodule.sliding_windows_definition.current_window is None
+            else datamodule.sliding_windows_definition.current_window
+        )
+        is_multiclass: bool = predictions.ndim == 2 and predictions.shape[1] > 1
 
         generators_in_batch = torch.unique(generator_ids).tolist() + ["*"]
         generator_key: GeneratorKey
         for generator_key in generators_in_batch:
+            generators_to_consider: Set[int]
             generator_window_idx = None
             if generator_key not in {"*", 0}:
                 for window, window_generators in enumerate(self.windows_order):
@@ -151,7 +159,6 @@ class MetricsManagerSlidingWindow(MetricsManager):
             ):
                 step_results = None
                 if generator_key == "*":
-                    generators_to_consider = None
                     if self.compute_mechanism == "immediate_future":
                         next_window_idx = min(
                             current_window + 1, len(self.windows_order) - 1
@@ -198,6 +205,7 @@ class MetricsManagerSlidingWindow(MetricsManager):
                             # Combine the fake and real masks
                             mask = mask | real_mask
                 else:
+                    generators_to_consider = {generator_key}
                     mask = generator_ids == generator_key
                     if generator_key != 0 and self.include_real_examples_in_metrics:
                         splitting: Dict[int, int] = datamodule.get_dataset_splitting(
@@ -220,13 +228,27 @@ class MetricsManagerSlidingWindow(MetricsManager):
                 generator_predictions = predictions[mask]
                 generator_labels = labels[mask]
 
+                # Fix for multiclass classification (with non-contiguous labels)
+                if is_multiclass:
+                    generators_to_consider.add(0)
+                    adapted_labels, adapted_preds = remap_labels_and_preds(
+                        generator_labels,
+                        generator_predictions,
+                        sorted(generators_to_consider),
+                    )
+                else:
+                    adapted_labels, adapted_preds = (
+                        generator_labels,
+                        generator_predictions,
+                    )
+
                 step_metrics, epoch_metrics = metrics_group_dict[stage][generator_key]
                 if step_metrics is not None:
                     self._updated_this_epoch = True
-                    step_results = step_metrics(generator_predictions, generator_labels)
+                    step_results = step_metrics(adapted_preds, adapted_labels)
                 if epoch_metrics is not None:
                     self._updated_this_epoch = True
-                    epoch_metrics.update(generator_predictions, generator_labels)
+                    epoch_metrics.update(adapted_preds, adapted_labels)
 
                 if step_results is not None:
                     self._log_metrics_step(
@@ -249,6 +271,11 @@ class MetricsManagerSlidingWindow(MetricsManager):
         ):
             return True
         return super()._allow_metrics_error(trainer)
+
+    def __repr__(self) -> str:
+        return (
+            f"MetricsManagerSlidingWindow(compute_mechanism={self.compute_mechanism})"
+        )
 
 
 __all__ = ["MetricsManagerSlidingWindow"]

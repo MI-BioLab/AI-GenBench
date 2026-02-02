@@ -1,0 +1,6 @@
+data:
+  class_path: lightning_data_modules.AIGenBenchPipeline
+  init_args:
+    augmentation_factor: 4
+experiment_info:
+  experiment_id: "RN50_clip_tune_resize_am4"

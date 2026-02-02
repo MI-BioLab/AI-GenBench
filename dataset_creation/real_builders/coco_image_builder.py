@@ -140,16 +140,10 @@ class COCODatasetManager(RealImagesBuilder):
 
 
 if __name__ == "__main__":
-    # coco_manager_train = COCODatasetManager(
-    #     ("/ssd1/datasets/coco/train2017", "/ssd1/datasets/coco/captions_train2017.json", "train"),
-    #     convert_to_jpeg=True,
-    #     num_proc=1,
-    # )
-
     coco_manager_val = COCODatasetManager(
         (
-            "/ssd1/datasets/coco/val2017",
-            "/ssd1/datasets/coco/captions_val2017.json",
+            "/datasets/coco/val2017",
+            "/datasets/coco/captions_val2017.json",
             "val",
         ),
         convert_to_jpeg=True,

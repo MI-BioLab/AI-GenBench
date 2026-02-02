@@ -1,0 +1,13 @@
+data:
+  class_path: lightning_data_modules.AIGenBenchPipeline
+  init_args:
+    augmentation_factor: 4
+    replay_strategy: 
+      class_path: lightning_data_modules.replay_strategies.ClassBalancedReplayStrategy
+      init_args:
+        replay_seed: 4242
+        buffer_size: 10000
+experiment_info:
+  experiment_id: "RN50_clip_tune_resize_am4_continual_cb"
+  sliding_windows_definition:
+    benchmark_type: "continual_learning"

@@ -45,9 +45,9 @@ class GenericModelProbe(Module):
 
         self.fc = new_head
 
-    def forward(self, x: Tensor, return_embedding=False) -> Tensor:
+    def forward(self, x: Tensor, return_feature=False) -> Tensor:
         features = self.forward_features(x)
-        if return_embedding:
+        if return_feature:
             return features
         return self.forward_head(features)
 

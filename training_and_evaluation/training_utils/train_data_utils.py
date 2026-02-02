@@ -1,28 +1,25 @@
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 from torch.utils.data import Dataset
 import datasets
 
 
 class DatasetWithGeneratorID(Dataset):
 
-    def __init__(self, dataset: datasets.Dataset, generator_id_to_name: List[str]):
+    def __init__(self, dataset: datasets.Dataset, generator_name_to_id: Dict[str, int]):
         self.dataset: datasets.Dataset = dataset
 
         self.dataset = self.dataset.select_columns(
             ["image", "label", "generator", "ID"]
         )
 
-        self.generator_name_to_id = dict()
+        self.generator_name_to_id = generator_name_to_id
 
         self._dataset_contains_real_images = self._contains_real_images(dataset)
 
         if self._dataset_contains_real_images:
             assert (
-                generator_id_to_name[0] == ""
-            ), 'The "real" generator should be the first generator and should be named "" (empty string)'
-
-        for i, generator in enumerate(generator_id_to_name):
-            self.generator_name_to_id[generator] = i
+                self.generator_name_to_id[""] == 0
+            ), 'The "real" generator should have generator ID 0 and should be named "" (empty string)'
 
     def __len__(self):
         return len(self.dataset)
@@ -63,14 +60,15 @@ class DatasetWithGeneratorID(Dataset):
 def split_dataset_by_generator(
     dataset: datasets.Dataset,
 ) -> Tuple[List[str], List[datasets.Dataset]]:
-    generators: List[str] = sorted(set(dataset["generator"]))
+    dataset_generators = dataset["generator"][:]
+    generators: List[str] = sorted(set(dataset_generators))
 
     datasets = []
     # Note: real is the empty string in the dataset
     # And it's always the first one in generators
     for gen in generators:
         indices = []
-        for i, g in enumerate(dataset["generator"]):
+        for i, g in enumerate(dataset_generators):
             if g == gen or (gen == "real" and g == ""):
                 indices.append(i)
 

@@ -5,3 +5,4 @@ from .openai_clip_image import *
 from .transformers_clip_model import *
 from .openclip_models import *
 from .dinov2 import *
+from .dinov3 import *

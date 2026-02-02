@@ -36,6 +36,7 @@ class CheckpointableTrainingSlidingWindows:
         self.trainer = None  # transient, not stored in the checkpoint
         self.ignore_sys_argv: bool = False
         self.offline_logging: Optional[bool] = False
+        self.ignore_resume_config_file: bool = False
 
     def __call__(
         self,
@@ -43,9 +44,20 @@ class CheckpointableTrainingSlidingWindows:
         experiment_resume_arguments: Optional[List[str]] = None,
         ignore_sys_argv: bool = False,
         offline_logging: Optional[bool] = False,
+        ignore_resume_config_file: bool = False,
     ):
+        ignore_sys_argv = _get_env_bool_parameter(
+            "GENBENCH_IGNORE_SYS_ARGV", ignore_sys_argv
+        )
+        offline_logging = _get_env_optional_bool_parameter(
+            "GENBENCH_OFFLINE_LOGGING", offline_logging
+        )
+        ignore_resume_config_file = _get_env_bool_parameter(
+            "GENBENCH_IGNORE_RESUME_CONFIG_FILE", ignore_resume_config_file
+        )
         self.ignore_sys_argv = ignore_sys_argv
         self.offline_logging = offline_logging
+        self.ignore_resume_config_file = ignore_resume_config_file
 
         cli_args: List[str] = [] if args is None else args
         if ignore_sys_argv:
@@ -65,6 +77,7 @@ class CheckpointableTrainingSlidingWindows:
             args=cli_args + self.experiment_resume_arguments,
             save_config_kwargs={"overwrite": True},
             offline_logging=self.offline_logging,
+            ignore_resume_config_file=self.ignore_resume_config_file,
         )
         action = self.cli.subcommand  # "fit", "test", "validate", "predict"
         is_evaluation = self.cli.is_evaluation
@@ -100,7 +113,6 @@ class CheckpointableTrainingSlidingWindows:
                     n_timeline_windows,
                     "windows.",
                 )
-
         else:
             n_windows = n_timeline_windows
 
@@ -110,7 +122,7 @@ class CheckpointableTrainingSlidingWindows:
 
         print()
         print("-" * 20, "Experiment ID:", experiment_id, "-" * 20)
-        print("IMPORTANT: In case of a crash/pause/preemption, you will be able to:")
+        print("IMPORTANT: In case of a crash/pause/preemption, you will be able to")
         print("resume this experiment by re-executing the same command and adding")
         print("the following arguments to the command line:")
         for resume_cli_arg in self.experiment_resume_arguments:
@@ -149,10 +161,15 @@ class CheckpointableTrainingSlidingWindows:
                     + multiwindow_evaluation_parameters,
                     save_config_kwargs={"overwrite": True},
                     offline_logging=self.offline_logging,
+                    ignore_resume_config_file=self.ignore_resume_config_file,
                 )
 
-                assert experiment_id == self.cli.experiment_id
-                assert current_window == self.cli.window_id
+                assert (
+                    experiment_id == self.cli.experiment_id
+                ), f"Experiment ID mismatch. Expected {experiment_id}, got {self.cli.experiment_id}"
+                assert (
+                    current_window == self.cli.window_id
+                ), f"Window ID mismatch. Expected {current_window}, got {self.cli.window_id}"
 
             # Keep track of the trainer: it's needed for the checkpointing
             # and for the logger
@@ -242,6 +259,7 @@ class CheckpointableTrainingSlidingWindows:
             experiment_resume_arguments=experiment_resume_arguments,
             ignore_sys_argv=self.ignore_sys_argv,
             offline_logging=self.offline_logging,
+            ignore_resume_config_file=self.ignore_resume_config_file,
         )  # submits to requeuing
 
     @staticmethod
@@ -256,6 +274,26 @@ class CheckpointableTrainingSlidingWindows:
         print("Generators order:")
         for i, window in enumerate(windows):
             print(i, window)
+
+
+def _get_env_bool_parameter(parameter_name: str, default_value: bool = False) -> bool:
+    """
+    Get an environment variable as a boolean, or return the default value if not set.
+    """
+    value = os.environ.get(parameter_name, str(default_value)).lower()
+    return value in {"true", "1", "yes", "y"}
+
+
+def _get_env_optional_bool_parameter(
+    parameter_name: str, default_value: Optional[bool]
+) -> Optional[bool]:
+    """
+    Get an environment variable as an optional boolean, or return the default value if not set.
+    """
+    value = os.environ.get(parameter_name, None)
+    if value is None:
+        return default_value
+    return value.lower() in {"true", "1", "yes", "y"}
 
 
 if __name__ == "__main__":

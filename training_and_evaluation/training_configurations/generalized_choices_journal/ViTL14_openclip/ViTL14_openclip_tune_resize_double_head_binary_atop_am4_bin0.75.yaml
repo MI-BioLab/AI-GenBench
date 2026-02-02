@@ -1,0 +1,10 @@
+data:
+  class_path: lightning_data_modules.AIGenBenchPipeline
+  init_args:
+    augmentation_factor: 4
+model:
+  class_path: algorithms.DoubleHeadModel
+  init_args:
+    binary_loss_weight: 0.75
+experiment_info:
+  experiment_id: "ViTL14_openclip_tune_resize_double_head_binary_atop_am4_bin0.75"

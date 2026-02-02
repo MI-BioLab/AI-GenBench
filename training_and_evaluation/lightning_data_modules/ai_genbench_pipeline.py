@@ -19,6 +19,7 @@ from lightning_data_modules.augmentation_utils import (
     RandomCropIfLarge,
     RandomResizedCropVariable,
 )
+from lightning_data_modules.replay_strategies import ReplayStrategy
 from training_utils.sliding_windows_experiment_data import SlidingWindowsDefinition
 
 
@@ -38,6 +39,7 @@ class AIGenBenchPipeline(DeepfakeDetectionDatamodule):
         augmentation_factor: int = 1,
         augmentations_base_seed: int = 4321,
         maximum_processing_size: Optional[int] = None,
+        replay_strategy: Optional[ReplayStrategy] = None,
     ):
         """
         Args:
@@ -61,6 +63,8 @@ class AIGenBenchPipeline(DeepfakeDetectionDatamodule):
                 to the augmentation pipeline. Images whose sides are smaller than maximum_processing_size
                 are not affected. This is done to avoid slowing down the augmentation pipeline when using
                 large images (which often happens in the field of deepfake / synthetic images detection).
+            replay_strategy (Optional[ReplayStrategy]): The replay strategy to use. Must be None
+                if not using continual learning with replay. Must be a ReplayStrategy object otherwise.
         """
         super().__init__(
             dataset_loader=dataset_loader,
@@ -74,6 +78,7 @@ class AIGenBenchPipeline(DeepfakeDetectionDatamodule):
             deterministic_augmentations=deterministic_augmentations,
             augmentation_factor=augmentation_factor,
             augmentations_base_seed=augmentations_base_seed,
+            replay_strategy=replay_strategy,
         )
 
         self.maximum_processing_size = maximum_processing_size
@@ -104,7 +109,9 @@ class AIGenBenchPipeline(DeepfakeDetectionDatamodule):
                 transforms.RandomApply(
                     [
                         transforms.Lambda(
-                            lambda img: data_augment_cmp(img, ["cv2", "pil"], [50, 101])
+                            lambda img: data_augment_cmp(
+                                img, ["cv2", "pil"], list(range(50, 101))
+                            )
                         )
                     ],
                     p=0.50,
@@ -113,7 +120,9 @@ class AIGenBenchPipeline(DeepfakeDetectionDatamodule):
                 transforms.RandomApply(
                     [
                         transforms.Lambda(
-                            lambda img: data_augment_cmp(img, ["cv2", "pil"], [50, 101])
+                            lambda img: data_augment_cmp(
+                                img, ["cv2", "pil"], list(range(50, 101))
+                            )
                         )
                     ],
                     p=0.20,
@@ -137,7 +146,9 @@ class AIGenBenchPipeline(DeepfakeDetectionDatamodule):
                 transforms.RandomApply(
                     [
                         transforms.Lambda(
-                            lambda img: data_augment_cmp(img, ["cv2", "pil"], [50, 101])
+                            lambda img: data_augment_cmp(
+                                img, ["cv2", "pil"], list(range(50, 101))
+                            )
                         )
                     ],
                     p=0.10,

@@ -160,6 +160,6 @@ __all__ = ["genimage_generator"]
 
 
 if __name__ == "__main__":
-    test_path = "/qnap_nfs/GenImage/ADM/imagenet_ai_0508_adm/train/ai/0_adm_31.PNG"
+    test_path = "/GenImage/ADM/imagenet_ai_0508_adm/train/ai/0_adm_31.PNG"
     img, generator, relative_path = _open_genimage_image(test_path)
     print(img, generator, relative_path)

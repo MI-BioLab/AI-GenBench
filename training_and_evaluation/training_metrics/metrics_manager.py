@@ -115,6 +115,7 @@ class MetricsManager(Callback):
         else:
             generator_metrics = stage_dict[generator_id]
 
+        # TODO: WIP, to be tested
         if epoch_only:
             new_metrics_list = generator_metrics[1]
             if new_metrics_list is None:
@@ -501,6 +502,9 @@ class MetricsManager(Callback):
         datamodule: "DeepfakeDetectionDatamodule" = self._trainer.datamodule
         assert datamodule is not None
 
+        is_multiclass: bool = predictions.ndim == 2 and predictions.shape[1] > 1
+        fit_generators_to_consider = sorted(datamodule.generators_so_far[1])
+
         generators_in_batch = torch.unique(generator_ids).tolist() + ["*"]
         generator_key: GeneratorKey
         for generator_key in generators_in_batch:
@@ -532,11 +536,25 @@ class MetricsManager(Callback):
                     generator_predictions = predictions[mask]
                     generator_labels = labels[mask]
 
+                # Fix for multiclass classification (with non-contiguous labels)
+                if is_multiclass and stage == "fit":
+                    # Remove columns for generators not in fit_generators_to_consider
+                    adapted_labels, adapted_preds = remap_labels_and_preds(
+                        generator_labels,
+                        generator_predictions,
+                        fit_generators_to_consider,
+                    )
+                else:
+                    adapted_labels, adapted_preds = (
+                        generator_labels,
+                        generator_predictions,
+                    )
+
                 step_metrics, epoch_metrics = metrics_group_dict[stage][generator_key]
                 if step_metrics is not None:
-                    step_results = step_metrics(generator_predictions, generator_labels)
+                    step_results = step_metrics(adapted_preds, adapted_labels)
                 if epoch_metrics is not None:
-                    epoch_metrics.update(generator_predictions, generator_labels)
+                    epoch_metrics.update(adapted_preds, adapted_labels)
 
                 if step_results is not None:
                     self._log_metrics_step(
@@ -595,6 +613,9 @@ class MetricsManager(Callback):
         )
         return real_mask
 
+    def __repr__(self) -> str:
+        return f"MetricsManager(include_real_examples_in_metrics={self.include_real_examples_in_metrics})"
+
 
 def _merge_metrics_defs(
     a: Optional[StepEpochMetrics], b: Optional[StepEpochMetrics]
@@ -634,3 +655,40 @@ def _merge_metrics_defs(
 
 
 __all__ = ["MetricsManager"]
+
+
+def remap_labels_and_preds(
+    targets: Tensor,
+    preds: Tensor,
+    original_labels: List[int],
+) -> tuple[Tensor, Tensor]:
+    """
+    Remap original non-contiguous class labels and predictions to contiguous format
+    suitable for torchmetrics.
+
+    Args:
+        targets (Tensor): shape (batch_size,), containing original class IDs.
+        preds (Tensor): shape (batch_size, full_num_classes) OR (batch_size, num_classes),
+                        predicted logits or probabilities. If larger than num_classes,
+                        assumes full label space.
+        original_labels (List[int]): list of class IDs actually used, e.g., [0, 4, 12, 21, 33]
+
+    Returns:
+        mapped_targets (Tensor): shape (batch_size,), mapped to [0, num_classes-1]
+        mapped_preds (Tensor): shape (batch_size, num_classes), ordered to match new labels
+    """
+    label_to_index = {label: idx for idx, label in enumerate(original_labels)}
+    index_tensor = torch.tensor(original_labels, device=preds.device)
+
+    # Map targets to new contiguous indices
+    mapped_targets = torch.tensor(
+        [label_to_index[int(t)] for t in targets],
+        device=targets.device,
+        dtype=targets.dtype,
+    )
+
+    # If preds has more columns than original_labels, select only relevant columns
+    if preds.shape[1] > len(original_labels):
+        preds = preds[:, index_tensor]
+
+    return mapped_targets, preds

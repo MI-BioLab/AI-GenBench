@@ -61,9 +61,12 @@ class LightningCLISlidingWindow(LightningCLI):
             type[SaveConfigCallback]
         ] = SaveConfigCallbackSlidingWindows,
         offline_logging: Optional[bool] = None,
+        ignore_resume_config_file: bool = False,
         **kwargs,
     ):
         self.offline_logging: Optional[bool] = offline_logging
+        self.ignore_resume_config_file: bool = ignore_resume_config_file
+
         self._patched: bool = False
         self.is_evaluation: bool = False
         self.is_multiwindow_evaluation: bool = False
@@ -290,10 +293,17 @@ class LightningCLISlidingWindow(LightningCLI):
             # Uses the config file to resume the experiment
             # (contains the loggers config, experiment_id, window_id, etc.)
             # For instance, it will contain the "id" of the W&B run to resume.
-            self._resume_overrides = [
-                "--config",
-                str(self.experiment_parameters_config_file),
-            ]
+            if self.ignore_resume_config_file:
+                print(
+                    "Ignoring the experiment parameters config file at",
+                    str(self.experiment_parameters_config_file),
+                    "because ignore_resume_config_file is set to True.",
+                )
+            else:
+                self._resume_overrides = [
+                    "--config",
+                    str(self.experiment_parameters_config_file),
+                ]
 
         self._logging_overrides = self.make_loggers_parameters()
 
@@ -370,20 +380,26 @@ class LightningCLISlidingWindow(LightningCLI):
                 self.subcommand
             ].model.init_args.base_weights
             if user_set_base_weights is None:
-                # Checkpoint of the previous window
-                # Reload those weights for trasfer learning to the next window
-                self._checkpoint_overrides["model"] = {
-                    "init_args": {
-                        "base_weights": str(
-                            self.training_window_info.latest_checkpoint_path
-                        ),
-                    },
-                }
-                print(
-                    "Will load the model weights from the checkpoint of the previous window at",
-                    str(self.training_window_info.latest_checkpoint_path),
-                    "because previous the window finished. Those weights will be used for transfer learning.",
-                )
+                if self.experiment_info.load_weights_from_previous_window:
+                    # Checkpoint of the previous window
+                    # Reload those weights for trasfer learning to the next window
+                    self._checkpoint_overrides["model"] = {
+                        "init_args": {
+                            "base_weights": str(
+                                self.training_window_info.latest_checkpoint_path
+                            ),
+                        },
+                    }
+                    print(
+                        "Will load the model weights from the checkpoint of the previous window at",
+                        str(self.training_window_info.latest_checkpoint_path),
+                        "because previous the window finished. Those weights will be used for transfer learning.",
+                    )
+                else:
+                    print(
+                        "The previous window finished, but the model weights will not be loaded because "
+                        "experiment_info.load_weights_from_previous_window is set to False."
+                    )
             else:
                 print(
                     "Will load the model weights from the given checkpoint at",

@@ -6,7 +6,7 @@ By default it computes the same metrics logged by the default set of metrics
 in the training script, but you can add your own metrics by implementing adapting the code a bit.
 
 Predictions will be taken from the npz files in the experiments folder.
-By default, the "validate" ones will be taken, but you can change this by
+By default, the "test" or "validate" ones will be taken, but you can change this by
 by changing the _find_predictions_file function.
 
 The output is a set of plots and a set of metrics printed to the console.
@@ -18,20 +18,43 @@ from collections import defaultdict
 import re
 from pathlib import Path
 import sys
+from typing import Literal, Union
 import numpy as np
 import matplotlib.pyplot as plt
 import click
 
 from evaluation_scripts.evaluate_predictions_utils import evaluate_predictions
 
-PREDICTIONS_FILE_FORMAT = re.compile(r"predictions_validate_epoch=\d+-step=(\d+)\.npz")
+PREDICTIONS_FILE_FORMAT = re.compile(r"predictions_test_epoch=\d+-step=(\d+)\.npz")
+PREDICTIONS_FILE_FORMAT_ALT = re.compile(
+    r"predictions_validate_epoch=\d+-step=(\d+)\.npz"
+)
+
+
+class FloatOrAuto(click.ParamType):
+    name = "float|auto"
+
+    def convert(self, value, param, ctx):
+        if isinstance(value, float):
+            return value
+        if isinstance(value, str):
+            if value.lower() == "auto":
+                return "auto"
+            try:
+                return float(value)
+            except ValueError:
+                self.fail(f"{value!r} is not a valid float or 'auto'", param, ctx)
+        self.fail(f"{value!r} is not a valid input", param, ctx)
+
+
+FLOAT_OR_AUTO = FloatOrAuto()
 
 
 @click.command()
 @click.argument(
     "experiment_path",
     type=click.Path(exists=True),
-    default="/home/lorenzo/Desktop/VCS/deepfake-benchmark/training_and_evaluation/experiments_data/experiment_0_DELME_DUMP_CROP_SCORES",
+    default="<default_experiment_folder>",
 )
 @click.option(
     "--computed_on",
@@ -43,19 +66,32 @@ PREDICTIONS_FILE_FORMAT = re.compile(r"predictions_validate_epoch=\d+-step=(\d+)
     type=click.Choice(["binary", "multiclass"]),
     default="binary",
 )
+@click.option("--threshold", type=FLOAT_OR_AUTO, default=0.5)
 @click.option("--use_pairing", type=bool, default=True)
 @click.option("--results_plot_dir", type=click.Path(), default="./eval_plots")
+@click.option("--save_plots", type=bool, default=False)
+@click.option("--print_csv", type=bool, default=True)
+@click.option(
+    "--dataset_path",
+    type=click.Path(exists=True),
+    default="<default_experiment_folder>",
+)
 def evaluate_multiwindow_predictions(
     experiment_path,
     computed_on,
     evaluation_task,
+    threshold,
     use_pairing,
     results_plot_dir,
+    save_plots,
+    print_csv,
+    dataset_path,
 ):
     metrics_timeline = defaultdict(list)
 
-    results_plot_dir = Path(results_plot_dir)
-    results_plot_dir.mkdir(exist_ok=True, parents=True)
+    if save_plots:
+        results_plot_dir = Path(results_plot_dir)
+        results_plot_dir.mkdir(exist_ok=True, parents=True)
 
     experiment_path = Path(experiment_path)
     for window_id in range(9):
@@ -67,13 +103,14 @@ def evaluate_multiwindow_predictions(
         )
 
         window_metrics = evaluate_predictions(
+            dataset_path=dataset_path,
             predictions_file=predictions_file,
             computed_on=computed_on,
             window_id=window_id,
-            threshold=0.5,
+            threshold=threshold,
             use_pairing=use_pairing,
             unknown_model_predictions_converter=convert_unknown_model_predictions,
-            save_plots_dir=results_plot_dir,
+            save_plots_dir=results_plot_dir if save_plots else None,
             evaluation_task=evaluation_task,
         )
 
@@ -98,13 +135,47 @@ def evaluate_multiwindow_predictions(
             continue
 
         print(f"{metric_name}: {metric_values}")
-        plt.figure()
-        plt.plot(metric_values, marker=".")
-        plt.title(f"{metric_name} Timeline")
-        plt.xlabel("Window")
-        plt.ylabel(metric_name)
-        plt.savefig(results_plot_dir / f"timeline_{computed_on}_{metric_name}.png")
-        plt.close()
+
+        if save_plots:
+            plt.figure()
+            plt.plot(metric_values, marker=".")
+            plt.title(f"{metric_name} Timeline")
+            plt.xlabel("Window")
+            plt.ylabel(metric_name)
+            plt.savefig(results_plot_dir / f"timeline_{computed_on}_{metric_name}.png")
+            plt.close()
+
+    print("----- Average Over Time -----")
+    for metric_name, metric_values in metrics_timeline.items():
+        if metric_name.endswith("per_generator") or metric_name.endswith(
+            "per_conditioning"
+        ):
+            continue
+
+        computed_on_values = metric_values
+        if computed_on == "immediate_future":
+            # Discard last value for immediate future
+            computed_on_values = computed_on_values[:-1]
+
+        average_value = np.mean(computed_on_values)
+        print(f"{metric_name} Average: {average_value:.4f}")
+
+    if print_csv:
+        experiment_name = experiment_path.name
+        values_to_print = metrics_timeline["roc_auc"]
+        if computed_on == "immediate_future":
+            # Discard last value for immediate future
+            values_to_print = values_to_print[:-1]
+
+        print(experiment_name)
+        for value in values_to_print:
+            print(f"{value:.6f}")
+
+        # Italian locale
+        print()
+        print(experiment_name)
+        for value in values_to_print:
+            print(f"{value:.6f}".replace(".", ","))
 
 
 def convert_unknown_model_predictions(
@@ -133,24 +204,37 @@ def convert_unknown_model_predictions(
     # return binary_classification_scores
 
 
-def _find_predictions_file(sliding_window_results_path: Path):
+def _find_predictions_file(
+    sliding_window_results_path: Path, allow_highest_step_file: bool = True
+) -> Path:
     # The "_all" file is the last one for each window
-    predictions_file = sliding_window_results_path / "predictions_validate_all.npz"
-
-    if predictions_file.exists():
-        return predictions_file
-
-    # Otherwise, we take the last one (the one with the highest step)
-    max_step = -1
+    candidate_predictions_files = [
+        sliding_window_results_path / "predictions_test_all.npz",
+        sliding_window_results_path / "predictions_validate_all.npz",
+    ]
     selected_file = None
 
-    for file in sliding_window_results_path.glob("*.npz"):
-        match = PREDICTIONS_FILE_FORMAT.match(file.name)
-        if match:
-            step = int(match.group(1))
-            if step > max_step:
-                max_step = step
-                selected_file = file
+    for candidate_file in candidate_predictions_files:
+        if candidate_file.exists():
+            selected_file = candidate_file
+            break
+    else:
+        if allow_highest_step_file:
+            # Otherwise, we take the last one (the one with the highest step)
+            max_step = -1
+            for file in sliding_window_results_path.glob("*.npz"):
+                match = PREDICTIONS_FILE_FORMAT.match(file.name)
+                match_alt = PREDICTIONS_FILE_FORMAT_ALT.match(file.name)
+                if match:
+                    step = int(match.group(1))
+                    if step > max_step:
+                        max_step = step
+                        selected_file = file
+                elif match_alt:
+                    step = int(match_alt.group(1))
+                    if step > max_step:
+                        max_step = step
+                        selected_file = file
 
     if selected_file is None:
         raise FileNotFoundError(

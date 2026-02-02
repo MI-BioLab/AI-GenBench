@@ -3,3 +3,8 @@ from .abstract_model import *
 from .base_model import *
 from .models import *
 from .soft_augmentations_model import *
+from .mild_augmentations_model import *
+from .knn_model import *
+from .double_head_model import *
+from .mix_resize_and_crop_model import *
+from .mix_resize_and_crop_soft_aug_model import *

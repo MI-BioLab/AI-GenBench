@@ -17,24 +17,44 @@ from sklearn.metrics import (
 )
 from scipy.special import softmax
 
+from evaluation_scripts.multiclass_to_binary_fusion_strategies import *
+
+import datasets
+from datasets import load_from_disk
+from large_image import LargeImage
+
+datasets.features.features.register_feature(LargeImage, "LargeImage")
+
 
 def evaluate_predictions(
+    dataset_path: Path,    
     predictions_file: Union[str, Path],
     computed_on: str,
     window_id: int,
-    threshold: float = 0.5,
+    threshold: Union[float, Literal["auto"]] = 0.5,
     use_pairing: bool = True,
     unknown_model_predictions_converter: Optional[Callable] = None,
     save_plots_dir: Optional[Union[str, Path]] = None,
-    multiclass_to_binary_converter: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    multiclass_to_binary_converter: Optional[
+        Callable[[np.ndarray, Set[int]], np.ndarray]
+    ] = None,
+    multiclass_to_binary_converter_knn: Optional[
+        Callable[[np.ndarray, np.ndarray, np.ndarray, Set[int]], np.ndarray]
+    ] = None,
     multicrop_predictions_fusion: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     evaluation_task: Literal["binary", "multiclass"] = "binary",
+    dataset_split: str = "validation",
 ):
     if multiclass_to_binary_converter is None:
         multiclass_to_binary_converter = _default_multiclass_to_binary_prediction
 
     if multicrop_predictions_fusion is None:
         multicrop_predictions_fusion = _default_multicrop_predictions_fusion
+
+    if multiclass_to_binary_converter_knn is None:
+        multiclass_to_binary_converter_knn = (
+            _default_multiclass_to_binary_prediction_knn
+        )
 
     data = np.load(predictions_file)
 
@@ -47,12 +67,16 @@ def evaluate_predictions(
         set([generator_id_to_name_list.index(gen_name) for gen_name in window])
         for window in windows_timeline
     ]
-    generators_to_consider = _considered_generators(
+    used_multiclass_logits_so_far = _considered_generators(
+        "growing", set_windows_order, window_id
+    )
+    eval_generators_to_consider = _considered_generators(
         computed_on, set_windows_order, window_id
     )
 
     # Obtain evaluation type
     is_multiclass_training = "crop_multiclass_predictions" in data
+    is_knn = "centroids" in data
     # is_multiclass_evaluation = data["fused_scores"].shape[1] > 1
 
     if evaluation_task == "multiclass" and not is_multiclass_training:
@@ -78,15 +102,48 @@ def evaluate_predictions(
     # Compute metrics
     if evaluation_task == "binary":
         if is_multiclass_training:
-            # If the model was trained on multiclass data, we need to convert predictions to binary
-            predictions = multiclass_to_binary_converter(predictions)
+            if is_knn:
+                # Predictions based the distance from centroids
+                predictions = multiclass_to_binary_converter_knn(
+                    predictions,
+                    data["centroids"],
+                    data["centroid_labels"],
+                    used_multiclass_logits_so_far,
+                )
+            else:
+                # If the model was trained on multiclass data, we need to convert predictions to binary
+                predictions = multiclass_to_binary_converter(
+                    predictions, used_multiclass_logits_so_far
+                )
+
+        image_identifiers = data["fused_identifiers"]
+        dataset = load_from_disk(dataset_path)[dataset_split]
+        conditioning_column: List[str] = dataset["conditioning"][:]
+        height_column: List[int] = dataset["height"][:]
+        width_column: List[int] = dataset["width"][:]
+        conditioning_column = [
+            "class" if cond.startswith("class/") else cond
+            for cond in conditioning_column
+        ]
+        conditioning_column = [
+            "image" if cond.startswith("image/") else cond
+            for cond in conditioning_column
+        ]
+        pixel_sizes = [
+            height * width for height, width in zip(height_column, width_column)
+        ]
+
+        conditioning_per_example = [conditioning_column[i] for i in image_identifiers]
+        pixel_sizes_per_example = [pixel_sizes[i] for i in image_identifiers]
 
         return _binary_metrics(
             predictions=predictions,
             ground_truth=ground_truth,
             generator_id_to_name=generator_id_to_name,
+            conditioning_per_example=conditioning_per_example,
+            pixel_sizes_per_example=pixel_sizes_per_example,
             pairing=pairing,
-            generators_to_consider=generators_to_consider,
+            generators_to_consider=eval_generators_to_consider,
             window_id=window_id,
             threshold=threshold,
             use_pairing=use_pairing,
@@ -99,7 +156,7 @@ def evaluate_predictions(
             ground_truth=ground_truth,
             generator_id_to_name=generator_id_to_name,
             pairing=pairing,
-            generators_to_consider=generators_to_consider,
+            generators_to_consider=eval_generators_to_consider,
             use_pairing=use_pairing,
             unknown_model_predictions_converter=unknown_model_predictions_converter,
         )
@@ -142,10 +199,12 @@ def _binary_metrics(
     predictions: np.ndarray,
     ground_truth: np.ndarray,
     generator_id_to_name: np.ndarray,
+    conditioning_per_example: List[str],
+    pixel_sizes_per_example: List[int],
     pairing: np.ndarray,
     generators_to_consider: Set[int],
     window_id: int,
-    threshold: float,
+    threshold: Union[float, Literal["auto"]],
     use_pairing: bool,
     save_plots_dir: Optional[Union[str, Path]] = None,
     unknown_model_predictions_converter: Optional[Callable] = None,
@@ -190,16 +249,26 @@ def _binary_metrics(
 
     predictions = predictions[mask]
     ground_truth = ground_truth[mask]
+    conditioning_per_example_np = np.array(conditioning_per_example)[mask]
+    pixel_sizes_per_example_np = np.array(pixel_sizes_per_example)[mask]
+
+    del conditioning_per_example
+    del pixel_sizes_per_example
 
     # Get number of real and fake images
     real_images = np.sum(ground_truth == 0)
     fake_images = np.sum(ground_truth != 0)
 
-    # Convert continuous predictions to binary (0 for real, 1 for fake) using a threshold
-    binary_predictions = (predictions > threshold).astype(int)
-
     # Convert ground truth to binary (0 for real, 1 for fake)
     ground_truth_binary = (ground_truth != 0).astype(int)
+
+    # Convert continuous predictions to binary (0 for real, 1 for fake) using a threshold
+    if threshold == "auto":
+        # Automatically compute the best threshold using the BestBinaryThresholdF1 class
+        threshold = compute_best_threshold(predictions, ground_truth_binary)
+        print(f"Best threshold found: {threshold:.4f}")
+
+    binary_predictions = (predictions > threshold).astype(int)
 
     # Calculate overall metrics
     accuracy = accuracy_score(ground_truth_binary, binary_predictions)
@@ -211,6 +280,132 @@ def _binary_metrics(
     tnr = tn / (tn + fp)
     average_precision = average_precision_score(ground_truth_binary, predictions)
     roc_auc = roc_auc_score(ground_truth_binary, predictions)
+
+    # Compute recall for each class
+    recalls = {}
+    counts_per_generator = np.unique(ground_truth, return_counts=True)
+    print(f"Counts per generator: {counts_per_generator}")
+    for generator_id in generators_to_consider:
+        if generator_id == 0:
+            continue
+        mask = ground_truth == generator_id
+        if np.sum(mask) == 0:
+            recalls[generator_id] = 0.0
+            continue
+        generator_predictions = binary_predictions[mask]
+        generator_ground_truth = ground_truth_binary[mask]
+        generator_recall = recall_score(
+            generator_ground_truth, generator_predictions, zero_division=0
+        )
+        recalls[generator_id] = generator_recall
+
+    # Compute recall for each conditioning type
+    conditioning_recalls = {}
+    for conditioning in np.unique(conditioning_per_example_np).tolist():
+        mask = conditioning_per_example_np == conditioning
+        mask = mask & (ground_truth != 0)  # Only consider fake images
+        if np.sum(mask) == 0:
+            continue
+        conditioning_predictions = binary_predictions[mask]
+        conditioning_ground_truth = ground_truth_binary[mask]
+        conditioning_recall = recall_score(
+            conditioning_ground_truth, conditioning_predictions, zero_division=0
+        )
+        conditioning_recalls[conditioning] = conditioning_recall
+
+    # Plot histogram of pixel sizes of wrong images for conditioning.startswith("inpainting")
+    inpainting_mask = np.array(
+        [cond.startswith("inpainting") for cond in conditioning_per_example_np]
+    )
+    fake_mask = ground_truth != 0  # Only consider fake images
+    wrong_predictions_mask = (
+        binary_predictions != ground_truth_binary
+    )  # Wrong predictions
+
+    # Combine all masks: inpainting + fake + wrong predictions
+    combined_mask = inpainting_mask & fake_mask & wrong_predictions_mask
+
+    if np.sum(combined_mask) > 0:
+        wrong_inpainting_pixel_sizes = pixel_sizes_per_example_np[combined_mask]
+        print(
+            "Min size of wrongly classified inpainting images:",
+            np.min(wrong_inpainting_pixel_sizes),
+        )
+        print(
+            "Max size of wrongly classified inpainting images:",
+            np.max(wrong_inpainting_pixel_sizes),
+        )
+        plt.figure(figsize=(10, 6))
+        plt.hist(wrong_inpainting_pixel_sizes, bins=50, alpha=0.7, edgecolor="black")
+        plt.title("Histogram of Pixel Sizes for Wrongly Classified Inpainting Images")
+        plt.xlabel("Pixel Size (Height x Width)")
+        plt.ylabel("Frequency")
+        plt.grid(True, alpha=0.3)
+
+        # Add some statistics as text on the plot
+        mean_size = np.mean(wrong_inpainting_pixel_sizes)
+        median_size = np.median(wrong_inpainting_pixel_sizes)
+        plt.axvline(
+            mean_size, color="red", linestyle="--", label=f"Mean: {mean_size:.0f}"
+        )
+        plt.axvline(
+            median_size,
+            color="orange",
+            linestyle="--",
+            label=f"Median: {median_size:.0f}",
+        )
+        plt.legend()
+
+        plt.tight_layout()
+        plt.savefig(
+            f"eval_plots/inpainting_wrong_pixel_sizes_histogram_{window_id}.png"
+        )
+        plt.close()
+
+        print(
+            f"Saved histogram for {np.sum(combined_mask)} wrongly classified inpainting images"
+        )
+    else:
+        print("No wrongly classified inpainting images found or save_plots_dir is None")
+
+    # Plot histogram of pixel sizes of all fake images for conditioning.startswith("inpainting")
+
+    # Combine all masks: inpainting + fake + wrong predictions
+    combined_mask = inpainting_mask & fake_mask
+
+    if np.sum(combined_mask) > 0:
+        wrong_inpainting_pixel_sizes = pixel_sizes_per_example_np[combined_mask]
+
+        plt.figure(figsize=(10, 6))
+        plt.hist(wrong_inpainting_pixel_sizes, bins=50, alpha=0.7, edgecolor="black")
+        plt.title("Histogram of Pixel Sizes for All Inpainting Images")
+        plt.xlabel("Pixel Size (Height x Width)")
+        plt.ylabel("Frequency")
+        plt.grid(True, alpha=0.3)
+
+        # Add some statistics as text on the plot
+        mean_size = np.mean(wrong_inpainting_pixel_sizes)
+        median_size = np.median(wrong_inpainting_pixel_sizes)
+        plt.axvline(
+            mean_size, color="red", linestyle="--", label=f"Mean: {mean_size:.0f}"
+        )
+        plt.axvline(
+            median_size,
+            color="orange",
+            linestyle="--",
+            label=f"Median: {median_size:.0f}",
+        )
+        plt.legend()
+
+        plt.tight_layout()
+        plt.savefig(f"eval_plots/inpainting_all_pixel_sizes_histogram_{window_id}.png")
+        plt.close()
+
+        print(
+            f"Saved histogram for {np.sum(combined_mask)} wrongly classified inpainting images"
+        )
+    else:
+        print("No wrongly classified inpainting images found or save_plots_dir is None")
 
     if save_plots_dir is not None:
         # Plot Precision-Recall curve
@@ -261,7 +456,31 @@ def _binary_metrics(
         "fp": fp,
         "fn": fn,
         "counts_per_generator": np.unique(ground_truth, return_counts=True),
+        "recall_per_generator": recalls,
+        "recall_per_conditioning": conditioning_recalls,
     }
+
+
+def compute_best_threshold(scores: np.ndarray, labels: np.ndarray, metric_option="f1"):
+    best_threshold = 0.0
+    best_score = -1.0
+
+    for threshold in np.linspace(0, 1, 1001):
+        # Convert threshold to a float if needed
+        preds_bin = scores >= threshold
+
+        if metric_option == "accuracy":
+            score = (preds_bin == labels).mean()
+        elif metric_option == "f1":
+            score = f1_score(labels, preds_bin, zero_division=0)
+        else:
+            raise ValueError("Unsupported metric. Use 'accuracy' or 'f1'.")
+
+        if score > best_score:
+            best_score = score
+            best_threshold = threshold
+
+    return best_threshold
 
 
 def _multiclass_metrics(
@@ -347,19 +566,6 @@ def _multiclass_metrics(
     }
 
 
-def _default_multiclass_to_binary_prediction(
-    batch_multiclass_scores: np.ndarray,
-) -> np.ndarray:
-    softmax_scores: np.ndarray = softmax(batch_multiclass_scores, axis=1)
-
-    # Compute fake probability by summing probabilities for classes with index >=1
-    binary_scores = softmax_scores[:, 1:].sum(axis=1)
-    binary_scores = np.ravel(binary_scores)
-
-    # It may happen, due to numerical instability, that the sum may get > 1.0 (like 1.0000001)
-    return np.clip(binary_scores, 0.0, 1.0)
-
-
 def _multicrop_fusion_with_ids(
     crop_scores: np.ndarray,
     crop_labels: np.ndarray,
@@ -400,7 +606,6 @@ def _multicrop_fusion_with_ids(
 
 
 def _default_multicrop_predictions_fusion(image_crop_scores: np.ndarray) -> np.ndarray:
-    import torch
 
     if len(image_crop_scores.shape) == 1 or image_crop_scores.shape[1] == 1:
         # If scores are 1D or single-channel (binary scores) just return the mean

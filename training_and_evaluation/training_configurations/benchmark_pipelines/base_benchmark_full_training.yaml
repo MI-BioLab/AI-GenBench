@@ -36,7 +36,7 @@ data:
   class_path: lightning_data_modules.AIGenBenchPipeline  # the benchmark definition pipeline
   init_args:
     dataset_loader:
-      class_path: lightning_data_modules.datasets.AIGenBenchDatasetLoader  # the dataset provider
+      class_path: lightning_data_modules.deepfake_datasets.AIGenBenchDatasetLoader  # the dataset provider
       init_args:
         dataset_path: "/deepfake/ai_gen_bench_dataset"
     train_batch_size: 128

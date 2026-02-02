@@ -28,7 +28,7 @@ class AIGenBenchDatasetLoader:
             dataset = dataset.add_column("ID", list(range(dataset_len)))
 
             # Only keep rows where the generator is in the benchmark (and also keep rows with generator "", which are the real images)
-            generators = dataset["generator"]
+            generators = dataset["generator"][:]
             indices = [
                 i
                 for i, gen in enumerate(generators)

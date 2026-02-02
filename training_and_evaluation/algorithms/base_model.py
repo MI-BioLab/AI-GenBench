@@ -1,4 +1,3 @@
-from functools import partial
 from pathlib import Path
 from typing import (
     Any,
@@ -37,7 +36,7 @@ from algorithms.abstract_model import AbstractBaseDeepfakeDetectionModel
 from torch.optim.lr_scheduler import OneCycleLR
 from PIL.Image import Image
 
-from torchvision.transforms.v2 import Resize, CenterCrop, FiveCrop, InterpolationMode
+from torchvision.transforms.v2 import Resize, CenterCrop, FiveCrop
 import torchvision.transforms.v2.functional as F
 
 from algorithms.augmentation_pipelines.baseline_augmentations import (
@@ -241,6 +240,11 @@ class BaseDeepfakeDetectionModel(AbstractBaseDeepfakeDetectionModel):
             score = out.detach().softmax(dim=1)
 
         self.log("train_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
+
+        if self.training_task == "multiclass":
+            # Metrics expect multiclass ground truth labels
+            y = generator_ids
+
         self._update_metrics(score, y, generator_ids, identifiers)
 
         return loss
@@ -374,13 +378,12 @@ class BaseDeepfakeDetectionModel(AbstractBaseDeepfakeDetectionModel):
             out.clone() if self.training_task == "multiclass" else None
         )
 
-        # Remove outputs for uninitialized classes using self.multiclass_output_mask
-        if self.training_task == "multiclass":
-            out = out[:, self.multiclass_output_mask]
-
         # Convert multiclass to binary if needed
         if self.training_task == "multiclass" and self.evaluation_type == "binary":
-            out = self.multiclass_to_binary_prediction(out)
+            # Also remove outputs for uninitialized classes using self.multiclass_output_mask
+            out = self.multiclass_to_binary_prediction(
+                out[:, self.multiclass_output_mask]
+            )
 
         if self.training_task == "binary" or self.evaluation_type == "binary":
             loss = torch.nn.functional.binary_cross_entropy_with_logits(
@@ -399,6 +402,10 @@ class BaseDeepfakeDetectionModel(AbstractBaseDeepfakeDetectionModel):
         self.log(
             f"{stage}_loss", loss.mean(), on_step=False, on_epoch=True, sync_dist=True
         )
+
+        if self.evaluation_type == "multiclass":
+            # Metrics expect multiclass ground truth labels
+            y = generator_ids
 
         n_images = unique_images.shape[0]
         fusion_scores = torch.empty(
@@ -615,27 +622,29 @@ class BaseDeepfakeDetectionModel(AbstractBaseDeepfakeDetectionModel):
 
         Note: it completely overrides the metrics registered in the parent class.
         """
-        # num_generators includes the "real" class, so it is the number of classes for multiclass tasks
-        num_generators: int = self.trainer.datamodule.num_generators
 
         if self.training_task == "multiclass":
             # multiclass task
-            fit_accuracy = partial(MulticlassAccuracy, num_classes=num_generators)
-            fit_recall = partial(MulticlassRecall, num_classes=num_generators)
-            aggregated_fit_metrics = [
-                MulticlassPrecision(num_classes=num_generators),
-                MulticlassSpecificity(num_classes=num_generators),
-                MulticlassAveragePrecision(num_classes=num_generators),
-                MulticlassAUROC(num_classes=num_generators),
-                MulticlassF1Score(num_classes=num_generators),
+            fit_accuracy = lambda num_classes: MulticlassAccuracy(
+                num_classes=num_classes
+            )
+            fit_recall = lambda num_classes: MulticlassRecall(num_classes=num_classes)
+            aggregated_fit_metrics = lambda num_classes: [
+                MulticlassPrecision(num_classes=num_classes),
+                MulticlassSpecificity(num_classes=num_classes),
+                MulticlassAveragePrecision(num_classes=num_classes),
+                MulticlassAUROC(num_classes=num_classes),
+                MulticlassF1Score(num_classes=num_classes),
             ]
         else:
             # binary classification task
-            fit_accuracy = partial(
-                BalancedBinaryAccuracy, threshold=self.classification_threshold
+            fit_accuracy = lambda num_classes: BalancedBinaryAccuracy(
+                threshold=self.classification_threshold
             )
-            fit_recall = partial(BinaryRecall, threshold=self.classification_threshold)
-            aggregated_fit_metrics = [
+            fit_recall = lambda num_classes: BinaryRecall(
+                threshold=self.classification_threshold
+            )
+            aggregated_fit_metrics = lambda num_classes: [
                 BinaryPrecision(threshold=self.classification_threshold),
                 BinarySpecificity(threshold=self.classification_threshold),
                 BinaryAveragePrecision(),
@@ -645,22 +654,26 @@ class BaseDeepfakeDetectionModel(AbstractBaseDeepfakeDetectionModel):
 
         if self.evaluation_type == "multiclass":
             # multiclass evaluation
-            eval_accuracy = partial(MulticlassAccuracy, num_classes=num_generators)
-            eval_recall = partial(MulticlassRecall, num_classes=num_generators)
-            aggregated_eval_metrics = [
-                MulticlassPrecision(num_classes=num_generators),
-                MulticlassSpecificity(num_classes=num_generators),
-                MulticlassAveragePrecision(num_classes=num_generators),
-                MulticlassAUROC(num_classes=num_generators),
-                MulticlassF1Score(num_classes=num_generators),
+            eval_accuracy = lambda num_classes: MulticlassAccuracy(
+                num_classes=num_classes
+            )
+            eval_recall = lambda num_classes: MulticlassRecall(num_classes=num_classes)
+            aggregated_eval_metrics = lambda num_classes: [
+                MulticlassPrecision(num_classes=num_classes),
+                MulticlassSpecificity(num_classes=num_classes),
+                MulticlassAveragePrecision(num_classes=num_classes),
+                MulticlassAUROC(num_classes=num_classes),
+                MulticlassF1Score(num_classes=num_classes),
             ]
         else:
             # binary evaluation
-            eval_accuracy = partial(
-                BalancedBinaryAccuracy, threshold=self.classification_threshold
+            eval_accuracy = lambda num_classes: BalancedBinaryAccuracy(
+                threshold=self.classification_threshold
             )
-            eval_recall = partial(BinaryRecall, threshold=self.classification_threshold)
-            aggregated_eval_metrics = [
+            eval_recall = lambda num_classes: BinaryRecall(
+                threshold=self.classification_threshold
+            )
+            aggregated_eval_metrics = lambda num_classes: [
                 BinaryPrecision(threshold=self.classification_threshold),
                 BinarySpecificity(threshold=self.classification_threshold),
                 BinaryAveragePrecision(),
@@ -668,47 +681,47 @@ class BaseDeepfakeDetectionModel(AbstractBaseDeepfakeDetectionModel):
                 BinaryF1Score(threshold=self.classification_threshold),
             ]
 
-        self._managers_set_metrics(
+        self._managers_set_metrics_from_factories(
             stage="fit",  # Training only
             generator_id="*",  # All examples
-            metrics=fit_accuracy(),  # A single metric or a MetricCollection
+            metric_factories=fit_accuracy,  # A single metric or a MetricCollection
             epoch_only=False,  # Log with both step and epoch granularity
             non_sliding_window_only=True,  # Only applies to "sliding window"-agnostic metric managers
         )
 
-        self._managers_set_metrics(
+        self._managers_set_metrics_from_factories(
             stage=["test", "validate"],  # During evaluation only
             generator_id=None,  # A different plot for each generator
-            metrics=eval_recall(),
+            metric_factories=eval_recall,
             epoch_only=True,  # Log only at epoch, not step. Common for eval-time metrics.
             non_sliding_window_only=True,  # Only applies to "sliding window"-agnostic metric managers
         )
 
-        self._managers_set_metrics(
+        self._managers_set_metrics_from_factories(
             stage=["test", "validate"],  # During evaluation only
             generator_id="*",  # All examples
-            metrics=eval_accuracy(),
+            metric_factories=eval_accuracy,
             epoch_only=True,  # Log only at epoch, not step. Common for eval-time metrics.
             # Applies to all metric managers
         )
 
-        self._managers_set_metrics(
+        self._managers_set_metrics_from_factories(
             stage="fit",  # All stages
             generator_id="*",  # All examples
-            metrics=[
-                fit_recall(),  # a.k.a. Sensitivity or True Positive Rate
-                *aggregated_fit_metrics,  # All other metrics
+            metric_factories=[
+                fit_recall,  # a.k.a. Sensitivity or True Positive Rate
+                aggregated_fit_metrics,  # All other metrics
             ],
             epoch_only=True,  # Log only at epoch, not step
             # Applies to all metric managers
         )
 
-        self._managers_set_metrics(
+        self._managers_set_metrics_from_factories(
             stage=["test", "validate"],  # All stages
             generator_id="*",  # All examples
-            metrics=[
-                eval_recall(),  # a.k.a. Sensitivity or True Positive Rate
-                *aggregated_eval_metrics,  # All other metrics
+            metric_factories=[
+                eval_recall,  # a.k.a. Sensitivity or True Positive Rate
+                aggregated_eval_metrics,  # All other metrics
             ],
             epoch_only=True,  # Log only at epoch, not step
             # Applies to all metric managers

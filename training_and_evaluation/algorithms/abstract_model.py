@@ -17,7 +17,17 @@ import torch
 from torch.nn import Module
 from torch import Tensor
 from PIL.Image import Image
-from torchmetrics import MetricCollection
+from torchmetrics import Metric
+import time
+
+from algorithms.model_factory_registry import ModelFactoryRegistry
+from training_metrics.metrics_manager import SUPPORTED_METRICS, GeneratorKey, StageT
+from training_metrics import (
+    BalancedBinaryAccuracy,
+    MetricsManager,
+    MetricsManagerSlidingWindow,
+)
+
 from torchmetrics.classification import (
     BinaryRecall,
     BinaryPrecision,
@@ -27,14 +37,6 @@ from torchmetrics.classification import (
     BinarySpecificity,
 )
 from lightning.pytorch.cli import OptimizerCallable
-
-from algorithms.model_factory_registry import ModelFactoryRegistry
-from training_metrics.metrics_manager import SUPPORTED_METRICS, GeneratorKey, StageT
-from training_metrics import (
-    BalancedBinaryAccuracy,
-    MetricsManager,
-    MetricsManagerSlidingWindow,
-)
 
 from torch.nn import Identity
 
@@ -93,8 +95,15 @@ class AbstractBaseDeepfakeDetectionModel(L.LightningModule, ABC):
 
         self.model: Module = Identity()
 
+        self._train_start_time: Optional[float] = None
+        self._train_end_time: Optional[float] = None
+        self._validation_start_time: Optional[float] = None
+        self._validation_end_time: Optional[float] = None
+        self._test_start_time: Optional[float] = None
+        self._test_end_time: Optional[float] = None
+
     def load_previous_checkpoint(self, checkpoint_path: Path):
-        print("Loading previous experiment checkpoint from", str(checkpoint_path))
+        print("Loading checkpoint from", str(checkpoint_path))
         try:
             self.load_state_dict(
                 torch.load(checkpoint_path, map_location="cpu")["state_dict"]
@@ -107,7 +116,7 @@ class AbstractBaseDeepfakeDetectionModel(L.LightningModule, ABC):
             self.model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
 
     def setup(self, stage: str):
-        self.make_model()
+        self.model = self.make_model()
         if self.base_weights is not None:
             self.load_previous_checkpoint(self.base_weights)
 
@@ -126,7 +135,7 @@ class AbstractBaseDeepfakeDetectionModel(L.LightningModule, ABC):
 
     def make_model(self) -> Module:
         """
-        Create the model instance and stores it in self.model.
+        Create the model instance.
 
         This method is called during setup().
         This method can be overridden by subclasses to customize the model creation.
@@ -147,7 +156,6 @@ class AbstractBaseDeepfakeDetectionModel(L.LightningModule, ABC):
                 f"Model {arguments['model_name']} created using factory {factory_name}"
             )
 
-        self.model = model
         return model
 
     def register_metrics(self):
@@ -261,6 +269,132 @@ class AbstractBaseDeepfakeDetectionModel(L.LightningModule, ABC):
                 epoch_only=epoch_only,
                 check_stage=check_stage,
             )
+
+    def _managers_set_metrics_from_factories(
+        self,
+        *,
+        stage: Optional[Union[StageT, List[StageT]]],
+        generator_id: Optional[Union[GeneratorKey, List[GeneratorKey]]],
+        metric_factories: Union[
+            Callable[[int], SUPPORTED_METRICS],
+            List[Callable[[int], Union[Metric, List[Metric]]]],
+        ],
+        metrics_group: str = "default",
+        epoch_only: bool = False,
+        sliding_window_only: bool = False,
+        non_sliding_window_only: bool = False,
+        check_stage: bool = True,
+    ):
+        """
+        Utility to set the metrics in the appropriate managers.
+        This differs from _managers_set_metrics() in that it uses a factory function
+        to specialize the number of classes in the metrics (different between sliding and non-sliding
+        window metric managers).
+
+        Args:
+            stage: The stage(s) for which the metrics are set. Can be a single stage, a list of stages,
+                or None to apply themetrics to all stages.
+            generator_id: The generator ID(s) for which the metrics are set. Can be a single ID, a list of IDs,
+                an '*' to register metrics that compute a single plot for all examples, or None to compute the metrics
+                separatedly for each generator.
+            metric_factories: The factories used to create the metrics.
+                This should be a callable that takes the number of classes as an argument and returns
+                a single metric, a list of metrics, or a MetricCollection.
+                The number of classes is the number of generators in the current sliding window,
+                or the total number of generators if sliding_window_only is False. This includes the "real" class.
+                Factories for binary classification should ignore the number of classes.
+            metrics_group: The group name for the metrics.
+            epoch_only: If True, the metrics will be logged only at epoch level, not at step level.
+            sliding_window_only: If True, the given metrics will be applied only to sliding-window metric managers
+                (the ones that compute metrics for each sliding window separately).
+            non_sliding_window_only: If True, only non-sliding window metric managers will be used.
+            check_stage: If True, the stage will be checked before setting the metrics.
+        """
+        datamodule: "DeepfakeDetectionDatamodule" = self.trainer.datamodule
+        num_generators: int = datamodule.num_generators  # Includes the "real" class
+        train_generators_so_far = len(datamodule.generators_so_far[0])
+
+        if stage is None:
+            stages = ["fit", "validate", "test"]
+        elif isinstance(stage, str):
+            stages = [stage]
+        else:
+            stages = list(stage)
+
+        assert not (sliding_window_only and non_sliding_window_only)
+        for manager in self.metric_managers:
+            is_sliding_manager = isinstance(manager, MetricsManagerSlidingWindow)
+            if sliding_window_only and not is_sliding_manager:
+                continue
+
+            if non_sliding_window_only and is_sliding_manager:
+                continue
+
+            for stage_name in stages:
+
+                if stage_name == "fit" and not is_sliding_manager:
+                    n_classes = train_generators_so_far
+                elif is_sliding_manager:
+                    part = manager.compute_mechanism
+                    n_classes = self.count_part_classes(part)
+                else:
+                    n_classes = num_generators
+
+                if isinstance(metric_factories, list):
+                    metrics = []
+                    for factory in metric_factories:
+                        created_metrics = factory(n_classes)
+                        if isinstance(created_metrics, Metric):
+                            metrics.append(created_metrics)
+                        else:
+                            metrics.extend(created_metrics)
+                else:
+                    metrics = metric_factories(n_classes)
+
+                manager.set_metrics(
+                    stage=stage_name,
+                    generator_id=generator_id,
+                    metrics=metrics,
+                    metrics_group=metrics_group,
+                    epoch_only=epoch_only,
+                    check_stage=check_stage,
+                )
+
+    def count_part_classes(
+        self, part: Literal["growing", "immediate_future", "past", "growing_whole"]
+    ) -> int:
+        """
+        Returns the number of classes in the given part of the benchmark (including the "real" class).
+        """
+        datamodule: "DeepfakeDetectionDatamodule" = self.trainer.datamodule
+        window_ids: List[List[str]] = datamodule.windows_timeline
+        current_window: int = (
+            0
+            if datamodule.sliding_windows_definition.current_window is None
+            else datamodule.sliding_windows_definition.current_window
+        )
+
+        if part == "immediate_future":
+            next_window_idx = min(current_window + 1, len(window_ids) - 1)
+            return len(window_ids[next_window_idx]) + 1
+        elif part == "growing":
+            generators = set()
+            for window in range(current_window + 1):
+                generators.update(window_ids[window])
+            return len(generators) + 1
+
+        elif part == "growing_whole":
+            generators = set()
+            for window in range(min(current_window + 2, len(window_ids))):
+                generators.update(window_ids[window])
+            return len(generators) + 1
+        elif part == "past":
+            generators = set()
+            for window in range(current_window):
+                generators.update(window_ids[window])
+            return len(generators) + 1
+        else:
+            raise ValueError(f"Invalid part: {part}")
 
     def adapt_model_for_training(self):
         """
@@ -487,17 +621,44 @@ class AbstractBaseDeepfakeDetectionModel(L.LightningModule, ABC):
 
         self.log(f"{stage}_window", current_window, on_epoch=True, sync_dist=False)
 
+    def on_train_epoch_start(self) -> None:
+        self._train_start_time = time.time()
+        if self.trainer.is_global_zero:
+            print(f"Training epoch {self.current_epoch} started.")
+
+    def on_validation_epoch_start(self) -> None:
+        self._validation_start_time = time.time()
+        if self.trainer.is_global_zero:
+            print(f"Validation epoch {self.current_epoch} started.")
+
+    def on_test_epoch_start(self) -> None:
+        self._test_start_time = time.time()
+        if self.trainer.is_global_zero:
+            print(f"Test epoch {self.current_epoch} started.")
+
     def on_train_epoch_end(self) -> None:
+        self._train_end_time = time.time()
         self.log_window_id("fit")
+        if self.trainer.is_global_zero:
+            assert self._train_start_time is not None
+            duration = self._train_end_time - self._train_start_time
+            print(f"Training epoch {self.current_epoch} ended in {duration:.2f}s.")
 
     def on_validation_epoch_end(self) -> None:
+        self._validation_end_time = time.time()
         self.log_window_id("validate")
+        if self.trainer.is_global_zero:
+            assert self._validation_start_time is not None
+            duration = self._validation_end_time - self._validation_start_time
+            print(f"Validation epoch {self.current_epoch} ended in {duration:.2f}s.")
 
     def on_test_epoch_end(self) -> None:
+        self._test_end_time = time.time()
         self.log_window_id("test")
-
-    # def on_predict_epoch_end(self) -> None:
-    #     self.log_window_id('predict')
+        if self.trainer.is_global_zero:
+            assert self._test_start_time is not None
+            duration = self._test_end_time - self._test_start_time
+            print(f"Test epoch {self.current_epoch} ended in {duration:.2f}s.")
 
 
 __all__ = ["AbstractBaseDeepfakeDetectionModel"]

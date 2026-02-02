@@ -1,0 +1,46 @@
+seed_everything: true
+trainer:
+  precision: "32-true"  # You can change this to "bf16-mixed" to use mixed precision
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1
+  gradient_clip_algorithm: null
+  # IMPORTANT: consider that, the the augmentation_pipelines YAML files,
+  # an augmentation_factor > 1 is used, which means that the number of
+  # samples in the training set is multiplied by that factor. Keep this in mind
+  # when setting the number of epochs.
+  max_epochs: 4
+  min_epochs: 4
+  logger:
+    - init_args:
+        save_dir: "./experiments_logs/journal_extension/RN50_clip_tune_resize"
+    - init_args:
+        project: "AIGenBench_JournalExtension"
+        save_dir: "./experiments_logs/journal_extension/wandb_logs"
+data:
+  class_path: lightning_data_modules.AIGenBenchPipeline
+  init_args:
+    augmentation_factor: 4
+    # Those are the per-GPU batch sizes.
+    # Consider that and the accumulate_grad_batches value above!
+    train_batch_size: 512
+    eval_batch_size: 512
+    train_subset_size: 0  # Set to a non-0 value to run a fast train (for debugging purposes)
+    validation_subset_size: 0  # Set to a non-0 value to run a fast validation (for debugging purposes)
+model:
+  class_path: algorithms.SoftTrainAugmentationsModel
+  init_args:
+    model_name: "RN50_tune"
+    optimizer:
+      class_path: torch.optim.SGD
+      init_args:
+        lr: 0.001
+        momentum: 0.9
+        dampening: 0.0
+        weight_decay: 0.0001
+    scheduler: "OneCycleLR"
+    model_input_size: 224
+    classification_threshold: 0.5
+    training_cropping_strategy: "resize"
+    evaluation_cropping_strategy: "resize"
+experiment_info:
+  experiment_id: "RN50_clip_tune_resize_soft_train_aug_am4_epochs4"

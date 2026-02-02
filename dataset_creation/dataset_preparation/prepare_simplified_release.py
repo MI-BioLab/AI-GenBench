@@ -305,10 +305,10 @@ def save_fake_part_only(dataset: DatasetDict, output_path: str):
 
 
 def main(
-    dataset_path: str = "/home/lorenzo/deepfake_fast/ai_gen_bench_v1.0.0",
-    output_path: str = "/datasets/users_working_dir/lorenzo/simplified_ai_genbench_fake_and_real",
-    fake_output_path: str = "/datasets/users_working_dir/lorenzo/simplified_ai_genbench_fake",
-    elsa_d3_path: str = "/datasets_nas/deepfake_datasets/ELSA_D3_offline",
+    dataset_path: str,
+    output_path: str,
+    fake_output_path: str,
+    elsa_d3_path: str,
 ):
     simplified_dataset: DatasetDict
     if Path(output_path).exists():

@@ -117,13 +117,13 @@ def _imagenet_image_list(prefix: str, folder: Path):
 
 if __name__ == "__main__":
     imagenet_manager_train = ImagenetDatasetManager(
-        "/ssd1/datasets/imagenet/train",
+        "/datasets/imagenet/train",
         "train",
         convert_to_jpeg=True,
     )
 
     imagenet_manager_val = ImagenetDatasetManager(
-        "/ssd1/datasets/imagenet/val",
+        "/datasets/imagenet/val",
         "val",
         convert_to_jpeg=True,
     )
