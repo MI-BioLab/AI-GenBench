@@ -1,11 +1,11 @@
 # Generalized Design Choices for Deepfake Detectors
 
 ## Content
-This folder contains the configuration files that can be used to reproduce the experiments of our paper [**Generalized Design Choices for Deepfake Detectors**](https://arxiv.org/abs/2511.21507).
+This folder contains the configuration files of the experiments of our paper [**Generalized Design Choices for Deepfake Detectors**](https://arxiv.org/abs/2511.21507).
 
 The configurations are divided into model-specific directories. To run the experiments, follow steps recommended in the [README in the root project](../../../README.md): you'll need to setup the [AI-GenBench dataset](../../../dataset_creation/README.md) and follow the guide to [run the training code](../../README.md).
 
-In particular, you'll need to pass 3 configuration files:
+In particular, you'll need to pass 3 configuration files (+ local config, optional):
 
 1. The benchmark configuration, usually `training_configurations/benchmark_pipelines/base_benchmark_sliding_windows.yaml`
 2. The general model training configration, such as `training_configurations/generalized_choices_journal/DINOv2/DINOv2_tune_resize_generic.yaml`

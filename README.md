@@ -34,7 +34,7 @@ This repository contains the code for:
 - Creating the AI-GenBench dataset, a **union of many existing datasets** of both AI-generated and real images
   - For a the complete list of included dataset, see [our paper](https://arxiv.org/abs/2504.20865) and the list found in the [dataset_creation](dataset_creation/README.md) folder.
 - Training and evaluating detection models on the AI-GenBench benchmark, using our [Lightning](https://lightning.ai/docs/pytorch/stable/)-based framework you can find in the [training_and_evaluation](training_and_evaluation/README.md) folder.
-- \[*Coming soon*\] Running the extensive experiments reported in our paper [Generalized Design Choices for Deepfake Detectors](https://arxiv.org/abs/2504.20865).
+- 🆕 Running the extensive experiments reported in our paper [Generalized Design Choices for Deepfake Detectors](https://arxiv.org/abs/2504.20865) (also found in [training_and_evaluation](training_and_evaluation/README.md) folder).
 
 ## Getting started
   - [How to: build the dataset](dataset_creation/README.md)

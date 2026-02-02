@@ -4,6 +4,9 @@ We provide a Lightning-based framework to train a detector on the AI-GenBench.
 The proposed AI-GenBench benchmark requires a detector to be trained on sliding windows of 4 generators, ordered chronologically. For more info, please refer to our paper [AI-GenBench: A New Ongoing Benchmark for AI-Generated Image Detection](https://arxiv.org/abs/2504.20865).
 This framework can also be used to train on the dataset without following the benchmark protocol.
 
+## Update
+The latest version also brings the code needed to reproduce the experiments found in our paper [Generalized Design Choices for Deepfake Detectors](https://arxiv.org/abs/2504.20865). The following guide applies to those as well! For the specific configurations, please check [the paper-specific readme](training_configurations/generalized_choices_journal/README.md).
+
 ## Getting started
 
 1. Clone the [repository](../).
