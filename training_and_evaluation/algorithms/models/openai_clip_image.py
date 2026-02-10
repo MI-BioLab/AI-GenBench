@@ -105,11 +105,14 @@ class OpenaiCLIPImageModelTune(torch.nn.Module):
     def forward_head(self, x: Tensor) -> Tensor:
         return self.fc(x)
 
-
-ModelFactoryRegistry().register_model_factory(
-    "openai_clip_image", make_openai_clip_image_model
-)
-
+import clip
+for arch in clip.available_models():
+    ModelFactoryRegistry().register_model_factory(
+        f"{arch}_tune", make_openai_clip_image_model
+    )
+    ModelFactoryRegistry().register_model_factory(
+        f"{arch}_probe", make_openai_clip_image_model
+    )
 
 __all__ = [
     "make_openai_clip_image_model",
@@ -121,5 +124,5 @@ __all__ = [
 if __name__ == "__main__":
     model = make_openai_clip_image_model("RN50_tune", num_classes=1)
     print(model)
-    model = make_openai_clip_image_model("RN50_probe", num_classes=1)
+    model = make_openai_clip_image_model("ViT-L/14_probe", num_classes=1)
     print(model)
